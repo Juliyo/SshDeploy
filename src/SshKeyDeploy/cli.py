@@ -6,6 +6,7 @@ from scp import SCPClient
 import getpass
 import json
 import os
+import base64
 
 KEY_PATH = os.path.expanduser("~/.ssh/id_rsa")  # Default SSH key path
 
@@ -35,7 +36,7 @@ def generate_ssh_key():
 
     return public_key_path
 
-def copy_key_to_server(public_key_path, server, user, password):
+def copy_key_to_server(public_key_path, server, user, password, ssh_auth_file):
     """Copy the public SSH key to the remote server's authorized_keys."""
     ssh_client = create_ssh_client(server, user, password)
 
@@ -65,12 +66,35 @@ def copy_key_to_server(public_key_path, server, user, password):
         else:  # Asume Windows
             # For Windows, use the SSHD server setup, which typically involves the .ssh folder as well
             # Ensure the .ssh directory exists
-            ssh_client.exec_command('mkdir C:\\Users\\' + user + '\\.ssh')
-            ssh_client.exec_command('icacls C:\\Users\\' + user + '\\.ssh /grant "' + user + ':(OI)(CI)F"')
+            stdin, stdout, stderr = ssh_client.exec_command(f'mkdir {ssh_auth_file}')
 
-            # Append the public key to authorized_keys (may be named differently)
-            stdin, stdout, stderr = ssh_client.exec_command('echo ' + public_key + ' >> C:\\Users\\' + user + '\\.ssh\\authorized_keys')
-            ssh_client.exec_command('icacls C:\\Users\\' + user + '\\.ssh\\authorized_keys /grant "' + user + ':(F)"')
+            public_key = public_key.replace('\n', '')
+
+            # Encode the public key using base64
+            encoded_public_key = base64.b64encode(public_key.encode()).decode()
+
+            # Send the encoded public key to the remote server
+            stdin, stdout, stderr = ssh_client.exec_command(f'echo {encoded_public_key} >> {ssh_auth_file}\\encoded_key')
+
+            # Decode the key on the remote server to a temporary file
+            decode_command = (
+                f'cmd /c "certutil -decode {ssh_auth_file}\\encoded_key {ssh_auth_file}\\authorized_keys_aux"'
+            )
+            stdin, stdout, stderr = ssh_client.exec_command(decode_command)
+
+            # Clean up the temporary file
+            cleanup_command = f'del {ssh_auth_file}\\encoded_key'
+            stdin, stdout, stderr = ssh_client.exec_command(cleanup_command)
+
+            # Append the content of the temporary file to the original authorized_keys file using PowerShell
+            append_command = (
+                f'powershell -Command "Get-Content {ssh_auth_file}\\authorized_keys_aux | Out-File -Append -Encoding utf8 {ssh_auth_file}\\authorized_keys"'
+            )
+            stdin, stdout, stderr = ssh_client.exec_command(append_command)
+
+            # Clean up the temporary file
+            cleanup_command = f'del {ssh_auth_file}\\authorized_keys_aux'
+            stdin, stdout, stderr = ssh_client.exec_command(cleanup_command)
 
             print(f"Public key copied to {server}:{user}'s authorized_keys on Windows.")
 
@@ -90,12 +114,16 @@ def main():
     ssh_ip = input("Enter SSH server IP address: ")
     ssh_user = input("Enter SSH username: ")
     ssh_password = getpass.getpass("Enter SSH password: ")
+    ssh_auth_file = input("Enter authorized_keys path (Or leave it empty to use C:\\ProgramData\\ssh): ")
+
+    if not ssh_auth_file:
+        ssh_auth_file = "C:\\ProgramData\\ssh"
 
     # Generate SSH key
     public_key_path = generate_ssh_key()
 
     # Copy the public key to the server
-    copy_key_to_server(public_key_path, ssh_ip, ssh_user, ssh_password)
+    copy_key_to_server(public_key_path, ssh_ip, ssh_user, ssh_password, ssh_auth_file)
 
 if __name__ == "__main__":
     main()
